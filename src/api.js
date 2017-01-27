@@ -10,8 +10,7 @@ var api = function () {
 
 api.initialize = function (options) {
     apiOptions = _.defaults(options, { timeout: 3000, json: true, strictSsl: true });
-    if (apiOptions.uri == null ||
-        apiOptions.auth == null ||
+    if (apiOptions.auth == null ||
         apiOptions.auth.user == null ||
         apiOptions.auth.password == null
     ) {
