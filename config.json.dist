@@ -1,0 +1,19 @@
+{
+  "cmwn_api": {
+    "user": "apiuser",
+    "password": "apipassword"
+  },
+  "media_api": {
+    "validate_hash": true,
+    "media_url": "https://media.changemyworldnow.com/"
+  },
+  "rollbar": {
+    "token": "rollbar token",
+    "environment": "local",
+    "level": "error",
+    "enabled": true
+  },
+  "aws": {
+    "bucket_name": "bucket name for process skribbles"
+  }
+}
