@@ -1,7 +1,8 @@
 var _      = require('lodash');
 var logger = require('./logger.js').logger;
 var api    = require('./api.js').api;
-var url = require('url');
+var search = require('./search.js').search;
+var url    = require('url');
 
 var processPage = function (search, json, resource) {
     logger.log('verbose', 'processing api json');
@@ -38,40 +39,79 @@ var getNextPage = function (json) {
     return nextLink;
 };
 
-var processor = function () {};
+var processor = function (options) {
+    var apiUri    = options.api;
+    var searchUri = options.search;
+    var user      = options.user;
+    var pass      = options.pass;
+    var spawn     = options.spawn;
 
-processor.importData = function (apiUri, search) {
-    return new Promise(function (resolve, reject) {
-        var urlObj       = url.parse(apiUri, false);
-        var pathSegments = urlObj.pathname.split('/');
-        var resource     = pathSegments[1];
+    logger.info('Cache Primer');
+    logger.log('debug', options);
 
-        if (pathSegments.length > 3) {
-            logger.error('Currently the primer cannot process', apiUri);
-            process.exit(11);
+    if (apiUri == undefined ||
+        searchUri == undefined ||
+        user == undefined ||
+        pass == undefined
+    ) {
+        logger.error('Missing required options');
+        process.exit(1);
+    }
+
+
+    var urlObj = url.parse(searchUri);
+    var searchIndex = urlObj.path.split('/')[1];
+
+    api.initialize({ auth: { user: user, password: pass } });
+    search.initialize({ host: searchUri, index: searchIndex });
+    return {
+        apiUrl:     apiUri,
+        search:     search,
+        spawn:      spawn,
+        importData: function () {
+            var that = this;
+            return new Promise(function (resolve, reject) {
+                var urlObj       = url.parse(that.apiUrl, false);
+                var pathSegments = urlObj.pathname.split('/');
+                var resource     = pathSegments[1];
+
+                if (pathSegments.length > 3) {
+                    logger.error('Currently the primer cannot process', apiUri);
+                    process.exit(11);
+                }
+
+                logger.log('verbose', 'Caching resource ', apiUri);
+                api.getUrl(that.apiUrl, resolve, reject)
+                    .then(function (json) {
+                        logger.log('info', 'Processing PROCESSING!!!!!!!');
+                        return processPage(that.search, json, resource);
+                    })
+                    .then(function (promises) {
+                        return Promise.all(promises);
+                    })
+                    .then(function (operations) {
+                        var ops = _.flatten(operations);
+                        search.putOps(ops);
+                    });
+            })
+                .then(function (json) {
+                    return getNextPage(json);
+                })
+                .then(function (nextLink) {
+                    if (!that.spawn && nextLink == null) {
+                        logger.log('verbose', 'Not spawning next page');
+                        return;
+                    }
+
+                    logger.log('verbose', 'Spawning next page');
+                })
+                .catch(function (err) {
+                    throw err;
+                });
         }
-
-        logger.log('verbose', 'Caching resource ', apiUri);
-        api.getUrl(apiUri, resolve, reject)
-            .then(function (json) {
-                logger.log('info', 'Processing PROCESSING!!!!!!!');
-                return processPage(search, json, resource);
-            })
-            .then(function (promises) {
-                return Promise.all(promises);
-            })
-            .then(function (operations) {
-                var ops = _.flatten(operations);
-                search.putOps(ops);
-            });
-    })
-    .then(function (json) {
-        return getNextPage(json);
-    })
-    .catch(function(err) {
-       throw err;
-    });
+    };
 };
+
 
 module.exports = {
     processor
