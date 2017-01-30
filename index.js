@@ -13,6 +13,7 @@ var optionDefinitions = [
     { name: 'spawn', alias: 's', type: Boolean },
     { name: 'api', type: String },
     { name: 'search', type: String },
+    { name: 'function', alias: 'f', type: String },
     { name: 'user', alias: 'u', type: String },
     { name: 'pass', alias: 'p', type: String },
 ];
