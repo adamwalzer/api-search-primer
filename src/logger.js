@@ -13,13 +13,13 @@ var logger = new (winston.Logger)({
     transports:  [
         new (winston.transports.Console)({
             colorize: true
-        }),
-        new (winston.transports.Rollbar)({
-            rollbarAccessToken: rollbarToken,
-            rollbarConfig:      rollbarConfig,
-            level:              rollbarConfig.level,
-            handleExceptions:   true
         })
+        // new (winston.transports.Rollbar)({
+        //     rollbarAccessToken: rollbarToken,
+        //     rollbarConfig:      rollbarConfig,
+        //     level:              rollbarConfig.level,
+        //     handleExceptions:   true
+        // })
     ]
 });
 

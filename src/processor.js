@@ -1,147 +1,309 @@
-var _      = require('lodash');
+var api = require('./api.js');
+var search = require('./search.js');
+var _ = require('lodash');
+var util = require('util');
+var EventEmitter = require('events');
 var logger = require('./logger.js').logger;
-var api    = require('./api.js').api;
-var search = require('./search.js').search;
-var url    = require('url');
-var AWS    = require('aws-sdk');
-var lambda = new AWS.Lambda();
 
-var processPage = function (search, json, resource) {
-    logger.log('verbose', 'processing api json');
-    logger.log('debug', 'on page', _.get(json,'page', -1));
-    var resources = _.find(_.get(json, '_embedded'));
+function ProcessorEmitter() {
+    EventEmitter.call(this);
+}
 
-    return _.map(resources, function (resourceData) {
-        var resourceId = getResourceId(resourceData);
-        logger.log('debug', 'Id for', resource, 'resource:', resourceId);
-        resourceData = _.omit(resourceData, ['_embedded', '_links', 'scope']);
+util.inherits(ProcessorEmitter, EventEmitter);
 
-        return search.putResource(resource, resourceId, resourceData);
+/**
+ * @typedef {Object} SwaggerType
+ * @property {Object.<SwaggerDef>} definitions
+ */
+
+/**
+ * @typedef {Object} SwaggerDef
+ * @property {String} type
+ * @property {String} description
+ * @property {String[]} required
+ * @property {Object.<SwaggerProp[]>} properties
+ * @property {Array.<SwaggerRef>} allOf
+ */
+
+/**
+ * @typedef {Object} SwaggerRef
+ * @property {String} $ref
+ */
+
+/**
+ * @typedef {Object} SwaggerProp
+ * @property {String} description
+ * @property {String} type
+ * @property {String} format
+ * @property {String[]} enum
+ */
+
+/**
+ * @typedef {Object} SwaggerParams
+ * @property {String} name
+ * @property {String} in
+ * @property {Boolean} required
+ * @property {String} description
+ * @property {String} type
+ * @property {String} format
+ * @property {Number} maximum
+ * @property {Number} minimum
+ */
+
+/**
+ *
+ * @param {Object.<api>} api
+ * @param {object.<search>} search
+ * @param {object.<logger>} logger
+ */
+module.exports = function Processor(api, search, logger) {
+    /**
+     * Finds all the models that have x-search-doc-type in the spec
+     *
+     * @param {Function.<getDefProperties>} getParentProps
+     * @param {Object.<SwaggerType>} swaggerJson - the swagger doc
+     *
+     * @return {Array} all the models that are marked as searchable
+     */
+    var getSearchableModels = _.memoize((getParentProps, swaggerJson) => {
+        return _.transform(
+            _.pickBy(swaggerJson.definitions, _.partial(_.has, _, 'x-search-doc-type')),
+            (result, value, key) => {
+                _.set(value, 'properties', getParentProps(key));
+                _.set(result, _.toLower(key), value);
+            }
+        );
+    }, (getParentProps, swaggerJson ) => {
+        return JSON.stringify(swaggerJson);
     });
-};
 
-var getResourceId = function (json) {
-    var keys = Object.keys(json);
-    var key  = _.findIndex(keys, function (key) {
-        return key.indexOf('_id') > -1
+    /**
+     * Finds all the properties of a definition from swagger
+     *
+     * @type {Function}
+     * @return {Object.<SwaggerProp[]>}
+     */
+    var getDefProperties = _.memoize((swaggerJson, def) => {
+        // This changes a JSON ref into something we can use in lodash to get
+        //    the spec
+        def = _.replace(def, '#/definitions/', '');
+
+        var spec = _.get(swaggerJson, 'definitions.' + def, {});
+        return _.reduce(_.get(spec, 'allOf'), (properties, ref) => {
+            _.merge(properties, getDefProperties(swaggerJson, _.get(ref, '$ref')));
+            return properties;
+        }, _.get(swaggerJson, 'definitions.' + def + '.properties', {}));
+    }, (swaggerJson, parent) => {
+        return parent;
     });
 
-    return _.get(json, keys[key]);
-};
+    /**
+     * Finds all the search paths for models
+     *
+     * @param {Object.<SwaggerType>} swaggerJson - the swagger doc
+     *
+     * @return {Array} all the models that are marked as searchable
+     */
+    var getSearchablePaths = _.memoize(swaggerJson => {
+        return _.reduce(swaggerJson.paths, (paths, pathSpec, pathKey) => {
+            if (!_.has(pathSpec, 'get.x-prime-for')) {
+                return paths;
+            }
 
-var getNextPage = function (json) {
-    var nextLink = _.get(json, '_links.next.href', false);
+            var primes = _.toLower(_.get(pathSpec, 'get.x-prime-for'));
+            return _.defaults(_.zipObject([primes], [pathKey]), paths);
+        }, []);
+    });
 
-    if (nextLink === false) {
-        logger.log('verbose', 'No more pages to process');
-        return;
-    }
+    /**
+     * Compares the mappings to what is already in elastic and updates them if need be
+     *
+     * @param {Object.<search>} searchApi - elastic search api
+     * @param {Object.<SwaggerDef>} searchable
+     *
+     * @todo suppot multi-field types
+     */
+    var updateElasticMapping = (searchApi, searchable) => {
+        var promises = _.map(searchable, (spec, entity) => {
+            return new Promise((resolve, reject) => {
+                return searchApi.getMapping(entity)
+                    .then(mapping => {
+                        var specProps = _.get(spec, 'elasticMap');
+                        if (!_.isEqual(specProps, mapping)) {
+                            logger.log('info', 'Updating mapping for', entity);
+                            return search.createMapping(entity, specProps)
+                                .then(result => {
+                                    console.log(result);
+                                });
+                        }
+                    })
+                    .then(resolve);
+            });
+        });
 
-    logger.log('debug', 'Next Link', nextLink);
-    return nextLink;
-};
+        return Promise.all(promises).then(() => {return searchable;});
+    };
 
-var processor = function (options) {
-    var apiUri    = options.api;
-    var searchUri = options.search;
-    var user      = options.user;
-    var pass      = options.pass;
-    var spawn     = options.spawn;
-    var lambdaFun = options.function;
+    /**
+     * Creates an elastic map based on swagger type
+     *
+     * @type {Function}
+     * @param {String} type - the swagger type
+     * @return {Object.<ElasticMapping>}
+     * @todo suppot multi-field types
+     */
+    var swaggerTypeToElastic = _.memoize(type => {
+        switch (type) {
+            case 'uuid':
+                return {
+                    type: 'string',
+                    index: 'no' // UUID's are not searchable
+                };
+                break;
 
-    logger.info('Cache Primer');
-    logger.log('debug', options);
+            case 'int32':
+                return {
+                    type: 'integer',
+                    doc_values: false,
+                    ignore_malformed: true
+                };
+                break;
 
-    if (apiUri == undefined ||
-        searchUri == undefined ||
-        user == undefined ||
-        pass == undefined
-    ) {
-        logger.error('Missing required options');
-        process.exit(1);
-    }
+            case 'int64':
+                return {
+                    type: 'long',
+                    doc_values: false,
+                    ignore_malformed: true
+                };
+                break;
 
-    if (spawn && (lambdaFun == undefined)) {
-        logger.error('Missing lambda function name to spawn');
-        process.exit(13);
-    }
+            case 'double':
+                return {
+                    type: 'double', // Swagger does not specify 32 or 64 float assume 64
+                    doc_values: false,
+                    ignore_malformed: true
+                };
+                break;
 
+            case 'date':
+            case 'date-time':
+                return {
+                    type: 'date',
+                    format: 'strict_date_optional_time' // Standard ISO date with optional time: https://www.elastic.co/guide/en/elasticsearch/reference/2.3/mapping-date-format.html
+                };
+                break;
 
-    var urlObj = url.parse(searchUri);
-    var searchIndex = urlObj.path.split('/')[1];
+            case 'byte':
+                return {
+                    type: 'string',
+                    index: 'not_analyzed',
+                    include_in_all: false
+                };
+                break;
 
-    api.initialize({ auth: { user: user, password: pass } });
-    search.initialize({ host: searchUri, index: searchIndex });
+            case 'binary':
+                return {
+                    type: 'boolean',
+                    index: 'no'
+                };
+                break;
+
+            case 'password':
+                return {
+                    type: 'boolean',
+                    index: 'no',
+                    include_in_all: false
+                };
+                break;
+
+            case 'string':
+                return {type: 'string'};
+                break;
+
+            default:
+                logger.info('warn', 'Property type', type, 'cannot be mapped to elastic');
+                return {
+                    type: 'string',
+                    index: 'no',
+                    include_in_all: false
+                };
+        }
+    });
+
+    /**
+     * Creates an elastic mapping from swagger specification
+     *
+     * @param {Function.<swaggerTypeToElastic>} propMap
+     * @param {Object.<SwaggerDef>} spec
+     * @return {Object.<ElasticMapping[]>}
+     */
+    var swaggerToElasticMapping = (propMap, spec) => {
+        return mapping = _.reduce(_.get(spec, 'properties', []), (mapping, prop, name) => {
+            var type = _.get(prop, 'type', 'string');
+            type = _.get(prop, 'format', type);
+
+            _.set(mapping, name, propMap(type));
+            return mapping;
+        }, {});
+    };
+
     return {
-        apiUrl:     apiUri,
-        search:     search,
-        spawn:      spawn,
-        importData: function () {
-            var that = this;
-            return new Promise(function (resolve, reject) {
-                var urlObj       = url.parse(that.apiUrl, false);
-                var pathSegments = urlObj.pathname.split('/');
-                var resource     = pathSegments[1];
+        index: (swaggerUrl) => {
+            api.getUrl(swaggerUrl)
+                .then(swaggerJson => {
+                    logger.log('info', 'Swagger Downloaded');
+                    // Get all the searchable models
+                    var searchable = getSearchableModels(
+                        _.partial(getDefProperties, swaggerJson),
+                        swaggerJson
+                    );
 
-                if (pathSegments.length > 3) {
-                    logger.error('Currently the primer cannot process', apiUri);
-                    process.exit(11);
-                }
+                    // Get the Entities that represent those models
+                    var paths = getSearchablePaths(swaggerJson);
 
-                logger.log('verbose', 'Caching resource ', apiUri);
-                api.getUrl(that.apiUrl, resolve, reject)
-                    .then(function (json) {
-                        logger.log('info', 'Processing PROCESSING!!!!!!!');
-                        return processPage(that.search, json, resource);
-                    })
-                    .then(function (promises) {
-                        return Promise.all(promises);
-                    })
-                    .then(function (operations) {
-                        var ops = _.flatten(operations);
-                        search.putOps(ops);
-                    });
-            })
-                .then(function (json) {
-                    return getNextPage(json);
-                })
-                .then(function (nextLink) {
-                    if (!that.spawn || nextLink == null) {
-                        logger.log('verbose', 'Not spawning next page');
-                        return;
+                    // Remove searchable entities with no matching path
+                    var missing = _.difference(_.keys(searchable), _.keys(paths));
+                    if (!_.isEmpty(missing)) {
+                        logger.log('warn', 'Missing paths to prime:', missing);
+                        searchable = _.omit(searchable, missing);
                     }
 
-                    logger.log('verbose', 'Spawning next page');
-                    return new Promise(function (lambdaResolve, lambdaReject) {
-                        logger.log('debug', 'Sending Lambda Payload');
+                    // Map the path to the model and flatten the properties
+                    return _.reduce(searchable, (defs, value, key) => {
+                        _.set(value, 'path', _.get(paths, key));
 
-                        var lambdaParams = {
-                            InvocationType: 'Event',
-                            FunctionName:   lambdaFun
-                        };
+                        _.set(value, 'elasticMap', swaggerToElasticMapping(
+                            swaggerTypeToElastic,
+                            value
+                        ));
 
-                        lambda.invoke(lambdaParams, function(err) {
-                            if (err) {
-                                logger.error('Failed to spanw next page');
-                                return lambdaReject(err);
-                            }
+                        _.set(defs, key, value);
+                        return defs;
+                    }, searchable);
+                })
+                // Check the index exists and create if need be
+                .then(searchable => {
+                    return new Promise((resolve, reject) => {
+                        search.checkIndex()
+                            .then(hasIndex => {
+                                if (hasIndex) {
+                                    logger.log('info', 'Index exists');
+                                    return searchable;
+                                }
 
-                            logger.log('debug', 'Successfully spawned nex page');
-                            lambdaResolve('Successfully spawned nex page');
-                        });
+                                logger.log('info', 'need to create index');
+                                return search.createIndex().then(() => {
+                                    return searchable
+                                });
+                            })
+                            .then(resolve)
+                            .catch(reject);
                     });
                 })
-                .then(function () {
-                    logger.log('verbose', 'done priming the page');
-                })
-                .catch(function (err) {
-                    throw err;
-                });
+                // TODO merge parent properties for each entity
+                // Compare mappings and create if need be
+                .then(_.partial(updateElasticMapping, search))
+                .then(console.log);
         }
     };
-};
-
-
-module.exports = {
-    processor
 };

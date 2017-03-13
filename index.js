@@ -1,46 +1,59 @@
-var _               = require('lodash');
-var request         = require('request').defaults();
-var logger          = require('./src/logger.js').logger;
-var commandLineArgs = require('command-line-args');
-var api             = require('./src/api.js').api;
-var search          = require('./src/search.js').search;
-var url             = require('url');
-var Processor       = require('./src/processor.js').processor;
+var _ = require('lodash');
+var request = require('request').defaults();
+var logger = require('./src/logger.js').logger;
+var url = require('url');
+var argv = require('yargs')
+    .usage('$0 [args]')
+    .options(
+        {
+            v: {
+                boolean: true,
+                alias: 'verbose',
+                describe: 'Turn on verbose logging'
+            },
+            d: {
+                boolean: true,
+                alias: 'debug',
+                describe: 'Turn on debugging ',
+            },
+            swagger: {
+                type: 'string',
+                describe: 'Location for swagger json',
+                demand: true
+            },
+            search: {
+                type: 'string',
+                describe: 'Location of elastic index',
+                demand: true
+            },
+            index: {
+                type: 'string',
+                describe: 'The index (environment) to prime ',
+                demand: true
+            }
+        }
+    )
+    .argv;
 
-var optionDefinitions = [
-    { name: 'verbose', alias: 'v', type: Boolean },
-    { name: 'debug', alias: 'd', type: Boolean },
-    { name: 'spawn', alias: 's', type: Boolean },
-    { name: 'api', type: String },
-    { name: 'search', type: String },
-    { name: 'function', alias: 'f', type: String },
-    { name: 'user', alias: 'u', type: String },
-    { name: 'pass', alias: 'p', type: String },
-];
-
-var options   = commandLineArgs(optionDefinitions);
-var user      = options.user;
-var pass      = options.pass;
-var spawn     = options.spawn;
-
-if (options.verbose) {
-    logger.level = 'verbose';
+if (argv.v) {
+    logger.level = 'info';
 }
 
-if (options.debug) {
+if (argv.d) {
     logger.level = 'debug';
 }
 
+var user = process.env.API_USER;
+var pass = process.env.API_PASS;
+
 logger.info('Cache Primer');
-logger.log('debug', options);
+logger.log('debug', argv);
 
-var processor = new Processor(options);
+var swaggerUrl = url.parse(argv.swagger);
+var apiUrl = swaggerUrl.protocol + '://' + swaggerUrl.host;
 
-var primeCache = function () {
-    return Promise.resolve(processor.importData());
-};
+var api = require('./src/api.js')(apiUrl, {auth: {user: user, password: pass}}, logger);
+var search = require('./src/search.js')(argv.search, {}, argv.index, logger);
+var processor = require('./src/processor')(api, search, logger);
 
-primeCache()
-    .catch(function (err) {
-        logger.error(err);
-    });
+processor.index(argv.swagger);
