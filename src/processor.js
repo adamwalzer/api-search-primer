@@ -73,7 +73,7 @@ module.exports = function Processor(api, search, logger) {
                 _.set(result, _.toLower(key), value);
             }
         );
-    }, (getParentProps, swaggerJson ) => {
+    }, (getParentProps, swaggerJson) => {
         return JSON.stringify(swaggerJson);
     });
 
@@ -121,7 +121,7 @@ module.exports = function Processor(api, search, logger) {
      * @param {Object.<search>} searchApi - elastic search api
      * @param {Object.<SwaggerDef>} searchable
      *
-     * @todo suppot multi-field types
+     * @todo support multi-field types
      */
     var updateElasticMapping = (searchApi, searchable) => {
         var promises = _.map(searchable, (spec, entity) => {
@@ -132,16 +132,28 @@ module.exports = function Processor(api, search, logger) {
                         if (!_.isEqual(specProps, mapping)) {
                             logger.log('info', 'Updating mapping for', entity);
                             return search.createMapping(entity, specProps)
-                                .then(result => {
-                                    console.log(result);
+                                .then(response => {
+                                    if (response.statusCode === 200) {
+                                        logger.log('info', 'successfylly updated mapping for', entity);
+                                        return;
+                                    }
+
+                                    throw Error('Failed to update entity: ' + entity + ' reason: ' + JSON.stringify(response.body));
                                 });
                         }
                     })
-                    .then(resolve);
+                    .then(resolve)
+                    .catch(reject);
             });
         });
 
-        return Promise.all(promises).then(() => {return searchable;});
+        return Promise.all(promises)
+            .then(() => {
+                return searchable;
+            })
+            .catch(err => {
+                throw err;
+            });
     };
 
     /**
@@ -249,7 +261,7 @@ module.exports = function Processor(api, search, logger) {
 
     return {
         index: (swaggerUrl) => {
-            api.getUrl(swaggerUrl)
+            return api.getUrl(swaggerUrl)
                 .then(swaggerJson => {
                     logger.log('info', 'Swagger Downloaded');
                     // Get all the searchable models
@@ -284,26 +296,35 @@ module.exports = function Processor(api, search, logger) {
                 // Check the index exists and create if need be
                 .then(searchable => {
                     return new Promise((resolve, reject) => {
-                        search.checkIndex()
+                        return search.checkIndex()
                             .then(hasIndex => {
-                                if (hasIndex) {
+                                if (hasIndex === true) {
                                     logger.log('info', 'Index exists');
                                     return searchable;
                                 }
 
                                 logger.log('info', 'need to create index');
-                                return search.createIndex().then(() => {
-                                    return searchable
-                                });
+                                return search.createIndex()
+                                    .then(response => {
+                                        if (response.statusCode === 200) {
+                                            logger.log('info', 'created index');
+                                            return searchable;
+                                        }
+
+                                        throw Error('Failed to create index: ' + JSON.stringify(response.body))
+                                    });
                             })
                             .then(resolve)
                             .catch(reject);
                     });
                 })
-                // TODO merge parent properties for each entity
                 // Compare mappings and create if need be
                 .then(_.partial(updateElasticMapping, search))
-                .then(console.log);
+                // Now the meat an potatoes the great indexing
+                .then(console.log)
+                .catch(err => {
+                    logger.log('error', err);
+                });
         }
     };
 };

@@ -122,7 +122,6 @@ module.exports = function (searchUri, options, index, logger) {
             .catch(err => {
                 logger.log('error', err);
                 _.attempt(reject, [err]);
-                throw err;
             });
     }, requester);
 
@@ -153,6 +152,7 @@ module.exports = function (searchUri, options, index, logger) {
             .then(response => {
                 logger.log('debug', 'Completed POST request to:', postUrl);
                 _.attempt(resolve, response);
+                return response;
             })
             .catch(err => {
                 logger.log('error', err);
@@ -171,9 +171,14 @@ module.exports = function (searchUri, options, index, logger) {
          * @param {String} type
          */
         checkIndex: _.partial((getUrl, indexUri) => {
-            return getUrl(indexUri).then(response => {
-                return response.statusCode === 200;
-            })
+            return getUrl(indexUri)
+                .then(response => {
+                    if (response.statusCode === 200 || response.statusCode === 404) {
+                        return response.statusCode === 200;
+                    }
+
+                    throw Error('Failed to check index: ' + JSON.stringify(response.body));
+                });
         }, getUrl, indexUri),
 
         /**
@@ -181,7 +186,7 @@ module.exports = function (searchUri, options, index, logger) {
          *
          * @type {Function}
          */
-        createIndex: _.partial(postUrl, indexUri, 'POST', '', {}),
+        createIndex: _.partial(postUrl, indexUri, 'POST', {}),
 
         /**
          * Makes a call to get a mapping for a type
@@ -193,11 +198,11 @@ module.exports = function (searchUri, options, index, logger) {
          */
         getMapping: _.partial((getUrl, uri, index, type) => {
             return getUrl(uri + '/' + type).then(response => {
-                if (response.statusCode !== 200) {
-                    return {};
+                if (response.statusCode == 200) {
+                    return _.get(response, 'body.' + index + '.mappings.' + type + '.properties');
                 }
 
-                return _.get(response, 'body.' + index + '.mappings.' + type + '.properties');
+                throw Error('Failed to get mapping: ' + JSON.stringify(response.body));
             })
         }, getUrl, indexUri + '/_mapping', index),
 
@@ -212,7 +217,7 @@ module.exports = function (searchUri, options, index, logger) {
         createMapping: _.partial(
             (postFunc, indexUri, type, mapping) => {
                 indexUri += '/_mapping/' + type;
-                return postFunc(indexUri, 'POST', _.set({}, 'properties', mapping));
+                return postFunc(indexUri, 'POST', _.set({}, 'proerties', mapping));
             },
             postUrl, indexUri
         )
