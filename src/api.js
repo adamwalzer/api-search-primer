@@ -14,7 +14,7 @@ module.exports = function (apiUri, options, logger) {
     logger.info('debug', 'Initializing API');
     _.defaults(options, {});
 
-    options.timeout = 3000;
+    options.timeout = 30000;
     options.json = true;
     options.strictSsl = true;
 
