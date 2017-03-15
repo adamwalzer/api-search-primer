@@ -1,74 +1,6 @@
-var logger        = require('./logger.js').logger;
-var request       = require('request');
-var _             = require('lodash');
-// var elasticsearch = require('elasticsearch');
-// var url           = require('url');
-//
-// var search = function () {
-//
-// };
-//
-// search.initialize = function (options) {
-//     searchOptions = _.defaults(options, { timeout: 3000, json: true });
-//     if (searchOptions.host == null || searchOptions.index == null) {
-//         logger.log('error', 'Cannot make search requests with missing options');
-//         process.exit(5);
-//     }
-//
-//     client = new elasticsearch.Client({
-//         host: searchOptions.host
-//     });
-//
-//     initialized = true;
-// };
-//
-// search.putOps = function(operations) {
-//     if (!initialized) {
-//         logger.log('error', 'Cannot make search request when not initialized');
-//         process.exit(7);
-//     }
-//
-//     return new Promise(function (searchResolve, searchReject) {
-//         client.bulk({
-//             body: operations
-//         }, function (err, response) {
-//             if (err) {
-//                 logger.error('Failed to complete bulk operation', err);
-//                 return searchReject(err);
-//             }
-//
-//             logger.info('Complete bulk operation(s)');
-//             searchResolve(response);
-//         });
-//     })
-//         .then(function () {
-//             logger.log('verbose', 'Updated Documents');
-//         })
-//         .catch(function (err) {
-//             logger.error('Failed to import from search: ', err);
-//             reject(err);
-//             throw err;
-//         });
-// };
-//
-// search.putResource = function (resource, resourceId, data) {
-//     return new Promise(function (resolve, reject) {
-//         return resolve([
-//             {
-//                 update: {
-//                     _index: searchOptions.index,
-//                     _type:  resource,
-//                     _id:    resourceId
-//                 }
-//             },
-//             { doc: data, doc_as_upsert : true }
-//         ]);
-//     })
-//     .catch(function (err) {
-//         throw err;
-//     });
-// };
-
+var logger = require('./logger.js').logger;
+var request = require('request');
+var _ = require('lodash');
 
 /**
  * @typedef {Object} ElasticMapping
@@ -81,12 +13,17 @@ var _             = require('lodash');
 
 
 module.exports = function (searchUri, options, index, logger) {
-    logger.info('debug', 'Initializing API');
+    logger.info('debug', 'Initializing Search');
     _.defaults(options, {});
 
     options.timeout = 3000;
     options.json = true;
     options.strictSsl = true;
+    options.aws = {
+        key: process.env.AWS_KEY,
+        secret: process.env.AWS_SECRET,
+        sign_version: 4
+    };
 
     var requester = request.defaults(options);
     var indexUri = searchUri + index;
@@ -104,7 +41,7 @@ module.exports = function (searchUri, options, index, logger) {
      */
     var getUrl = _.partial((request, url, query, resolve, reject) => {
         _.defaults(query, {});
-        logger.log('debug', 'Making call to:' , url, 'with the following query:', query);
+        logger.log('debug', 'Making call to:', url, 'with the following query:', query);
         return new Promise((apiResolve, apiReject) => {
             request(url, {qs: query}, (err, response, body) => {
                 if (err) {
@@ -139,7 +76,7 @@ module.exports = function (searchUri, options, index, logger) {
      */
     var postUrl = _.partial((request, postUrl, method, data, resolve, reject) => {
         _.defaultTo(method, 'POST');
-        logger.log('debug', 'Posting to:' , postUrl, 'with the following data:', data);
+        logger.log('debug', 'Posting to:', postUrl, 'with the following data:', data);
         return new Promise((apiResolve, apiReject) => {
             request(postUrl, {method: method, json: data}, (err, response) => {
                 if (err) {
@@ -173,6 +110,7 @@ module.exports = function (searchUri, options, index, logger) {
         checkIndex: _.partial((getUrl, indexUri) => {
             return getUrl(indexUri)
                 .then(response => {
+                    logger.log('debug', 'checkIndex response code', response.statusCode);
                     if (response.statusCode === 200 || response.statusCode === 404) {
                         return response.statusCode === 200;
                     }
@@ -198,6 +136,7 @@ module.exports = function (searchUri, options, index, logger) {
          */
         getMapping: _.partial((getUrl, uri, index, type) => {
             return getUrl(uri + '/' + type).then(response => {
+                logger.log('debug', 'getMapping response code', response.statusCode);
                 if (response.statusCode == 200) {
                     return _.get(response, 'body.' + index + '.mappings.' + type + '.properties');
                 }
@@ -217,7 +156,25 @@ module.exports = function (searchUri, options, index, logger) {
         createMapping: _.partial(
             (postFunc, indexUri, type, mapping) => {
                 indexUri += '/_mapping/' + type;
-                return postFunc(indexUri, 'POST', _.set({}, 'proerties', mapping));
+                return postFunc(indexUri, 'POST', _.set({}, 'properties', mapping));
+            },
+            postUrl, indexUri
+        ),
+
+        /**
+         * Posts a document to elastic
+         *
+         * @type {Function}
+         * @param {String} type - the type of document
+         * @param {String} docId - the Id of the document
+         * @param {Object} document - the document to post
+         *
+         * @return {Promise}
+         */
+        indexDocument: _.partial(
+            (postFunc, indexUrl, type, docId, document) => {
+                var docUrl = indexUrl + '/' + type + '/' + docId;
+                return postUrl(docUrl, 'POST', document);
             },
             postUrl, indexUri
         )

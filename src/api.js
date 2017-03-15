@@ -88,45 +88,8 @@ module.exports = function (apiUri, options, logger) {
         return getUrl(request, apiUrl, query, resolve, reject)
     };
 
-    /**
-     * Makes a Post call to the API
-     *
-     * @param {Function.<request>} request - Request Module
-     * @param {String} base
-     * @param {String} path
-     * @param {Object} data
-     * @param resolve
-     * @param reject
-     * @return {Promise}
-     */
-    var postResource = (request, base, path, data, resolve, reject) => {
-        path = _.startsWith('/', path) ? path.substring(1) : path;
-        base = !_.endsWith('/', base) ? base + '/' : base;
-        var apiUrl = base + path;
-        logger.log('debug', 'Posting to:' , apiUrl, 'with the following data:', data);
-        return new Promise(function (apiResolve, apiReject) {
-            request(base + path, {method: 'POST', json: data}, (err, response, body) => {
-                if (err) {
-                    return apiReject(Error('Error posting: ' + apiUrl + ' ' + err));
-                }
-
-                return apiResolve(response);
-            });
-        })
-            .then((body) => {
-                logger.log('debug', 'Completed POST request to:', apiUrl);
-                _.attempt(resolve, body);
-            })
-            .catch(err => {
-                logger.log('error', err);
-                _.attempt(reject, [err]);
-                throw err;
-            });
-    };
-
     return {
         getUrl: _.partial(getUrl, requester),
         getResource: _.partial(getResource, requester, apiUri),
-        postResource: _.partial(postResource, requester, apiUri)
     }
 };

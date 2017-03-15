@@ -50,6 +50,7 @@ logger.info('Cache Primer');
 logger.log('debug', argv);
 
 var swaggerUrl = url.parse(argv.swagger);
+// TODO possibly move this into the processor so it can use what is in the swagger docs
 var apiUrl = swaggerUrl.protocol + '://' + swaggerUrl.host;
 
 var api = require('./src/api.js')(apiUrl, {auth: {user: user, password: pass}}, logger);

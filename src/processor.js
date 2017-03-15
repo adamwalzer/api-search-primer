@@ -53,10 +53,13 @@ util.inherits(ProcessorEmitter, EventEmitter);
 /**
  *
  * @param {Object.<api>} api
- * @param {object.<search>} search
+ * @param {object.<search>} searchApi
  * @param {object.<logger>} logger
  */
-module.exports = function Processor(api, search, logger) {
+module.exports = function Processor(api, searchApi, logger) {
+
+    var events = new ProcessorEmitter();
+
     /**
      * Finds all the models that have x-search-doc-type in the spec
      *
@@ -110,9 +113,33 @@ module.exports = function Processor(api, search, logger) {
                 return paths;
             }
 
+            var pathReturn = {};
             var primes = _.toLower(_.get(pathSpec, 'get.x-prime-for'));
-            return _.defaults(_.zipObject([primes], [pathKey]), paths);
-        }, []);
+
+            // get the key used for embedded properties
+            var responseSchema = getDefProperties(
+                swaggerJson,
+                _.get(pathSpec, 'get.responses.200.schema.$ref')
+            );
+
+            // Finds what the object key will be for the response
+            _.set(
+                pathReturn,
+                'key',
+                '_embedded.' + _.first(_.keys(_.get(responseSchema, '_embedded.properties')))
+            );
+
+            // create the full path for the request
+            _.set(
+                pathReturn,
+                'path',
+                'https://' + _.replace(swaggerJson.host + swaggerJson.basePath + pathKey, '//', '/')
+            );
+
+            // reduce what we want
+            _.set(paths, primes, pathReturn);
+            return paths;
+        }, {});
     });
 
     /**
@@ -124,6 +151,7 @@ module.exports = function Processor(api, search, logger) {
      * @todo support multi-field types
      */
     var updateElasticMapping = (searchApi, searchable) => {
+        logger.log('info', 'Checking mappings');
         var promises = _.map(searchable, (spec, entity) => {
             return new Promise((resolve, reject) => {
                 return searchApi.getMapping(entity)
@@ -131,7 +159,7 @@ module.exports = function Processor(api, search, logger) {
                         var specProps = _.get(spec, 'elasticMap');
                         if (!_.isEqual(specProps, mapping)) {
                             logger.log('info', 'Updating mapping for', entity);
-                            return search.createMapping(entity, specProps)
+                            return searchApi.createMapping(entity, specProps)
                                 .then(response => {
                                     if (response.statusCode === 200) {
                                         logger.log('info', 'successfylly updated mapping for', entity);
@@ -215,20 +243,27 @@ module.exports = function Processor(api, search, logger) {
 
             case 'binary':
                 return {
-                    type: 'boolean',
+                    type: 'byte',
                     index: 'no'
                 };
                 break;
 
             case 'password':
                 return {
-                    type: 'boolean',
+                    type: 'string',
                     index: 'no',
                     include_in_all: false
                 };
                 break;
 
+            case 'boolean':
+                return {
+                    type: 'boolean'
+                };
+                break;
+
             case 'string':
+            case 'email':
                 return {type: 'string'};
                 break;
 
@@ -259,9 +294,117 @@ module.exports = function Processor(api, search, logger) {
         }, {});
     };
 
+    /**
+     * Checks the index and creates is needed
+     *
+     * @param {Object.<search>} searchApi - Search API
+     * @param {Object.<SwaggerDef>} searchable - Search hash
+     * @return {Promise}
+     */
+    var checkIndex = (searchApi, searchable) => {
+        return new Promise((resolve, reject) => {
+            return searchApi.checkIndex()
+                .then(hasIndex => {
+                    if (hasIndex === true) {
+                        logger.log('info', 'Index exists');
+                        return;
+                    }
+
+                    logger.log('info', 'need to create index');
+                    return searchApi.createIndex()
+                        .then(response => {
+                            if (response.statusCode === 200) {
+                                logger.log('info', 'created index');
+                                return;
+                            }
+
+                            throw Error('Failed to create index: ' + JSON.stringify(response.body))
+                        });
+                })
+                .then(() => {
+                    resolve(searchable);
+                    return searchable
+                })
+                .catch(reject);
+        });
+    };
+
+    /**
+     * Process an API to search
+     *
+     * @param {Object.<api>} api - API caller
+     * @param {Object.<search>} search - Search caller
+     * @param {String} url - Url to call
+     * @param {String} type - type of entity
+     * @param {Object} spec - the searchable spec
+     * @param {Function} resolve - callback when all pages are complete
+     */
+    var processUrlForSearch = (api, search, url, type, spec, resolve) => {
+        api.getUrl(url)
+            .then(response => {
+                var entities = _.get(response, _.get(spec, 'path.key'));
+
+                // emit an event for each entity
+                _.each(entities, (entity) => {
+                    // Transform an entity into a document
+                    var docId = _.get(entity, _.get(spec, 'x-search-doc-id'));
+                    var document = _.pick(entity, _.keys(_.get(spec, 'elasticMap')));
+                    _.unset(document, _.get(spec, 'x-search-doc-id'));
+
+                    events.emit('saveEntity', type, docId, document);
+                });
+
+                // process next page
+                if (_.has(response, '_links.next')) {
+                    events.emit(
+                        'processUrl',
+                        api,
+                        search,
+                        _.get(response, '_links.next.href'),
+                        type,
+                        spec,
+                        resolve
+                    );
+
+                    return;
+                }
+
+                _.attempt(resolve);
+            })
+            .catch(err => {
+                logger.log('error', 'Failed to process', url, 'for', url, 'reason', err);
+                _.attempt(resolve);
+            });
+    };
+
+    events.on('saveEntity', (type, docId, document) => {
+        // index the document and handle the promise
+        searchApi.indexDocument(type, docId, document)
+            .then(response => {
+                if (_.get(response, 'statusCode') != 201) {
+                    logger.log('debug', type, 'with id', docId, 'was indexed successfully');
+                    return
+                }
+
+                logger.log('warn', type, 'with id', docId, 'failed to index', JSON.stringify(response.body));
+            })
+            .catch(err => {
+                logger.log('alert', type, 'with id', docId, 'failed to index', err);
+            });
+    });
+
+    events.on('processUrl', processUrlForSearch);
+
     return {
+        /**
+         * Indexes all from a swagger document
+         *
+         * @param {String} swaggerUrl - the location of the swagger json
+         * @return {Promise}
+         */
         index: (swaggerUrl) => {
             return api.getUrl(swaggerUrl)
+            // process swagger
                 .then(swaggerJson => {
                     logger.log('info', 'Swagger Downloaded');
                     // Get all the searchable models
@@ -294,36 +437,27 @@ module.exports = function Processor(api, search, logger) {
                     }, searchable);
                 })
                 // Check the index exists and create if need be
-                .then(searchable => {
-                    return new Promise((resolve, reject) => {
-                        return search.checkIndex()
-                            .then(hasIndex => {
-                                if (hasIndex === true) {
-                                    logger.log('info', 'Index exists');
-                                    return searchable;
-                                }
-
-                                logger.log('info', 'need to create index');
-                                return search.createIndex()
-                                    .then(response => {
-                                        if (response.statusCode === 200) {
-                                            logger.log('info', 'created index');
-                                            return searchable;
-                                        }
-
-                                        throw Error('Failed to create index: ' + JSON.stringify(response.body))
-                                    });
-                            })
-                            .then(resolve)
-                            .catch(reject);
-                    });
-                })
+                .then(_.partial(checkIndex, searchApi))
                 // Compare mappings and create if need be
-                .then(_.partial(updateElasticMapping, search))
+                .then(_.partial(updateElasticMapping, searchApi))
                 // Now the meat an potatoes the great indexing
-                .then(console.log)
-                .catch(err => {
-                    logger.log('error', err);
+                .then(searchable => {
+                    logger.log('info', 'Indexing entities');
+                    var promises = _.map(searchable, (spec, entity) => {
+                        return new Promise((resolve, reject) => {
+                            events.emit(
+                                'processUrl',
+                                api,
+                                searchApi,
+                                _.get(spec, 'path.path'),
+                                entity,
+                                spec,
+                                resolve
+                            );
+                        });
+                    });
+
+                    return Promise.all(promises);
                 });
         }
     };
